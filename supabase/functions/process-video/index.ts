@@ -3,11 +3,47 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 // @ts-ignore
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+// --- CORS Configuration ---
+const VERCEL_PREVIEW_URL = 'https://clipping-generation-app-1far-cp7r9udye-zahtech123s-projects.vercel.app';
+// TODO: Add your production URL when known, e.g., 'https://your-production-domain.com'
+const LOCALHOST_URL = 'http://localhost:5173';
+
+// --- Simple CORS Headers (Allows Vercel Preview URL for now) ---
+// NOTE: This simple setup only allows ONE origin at a time.
+// To allow multiple (e.g., Vercel + Localhost), you need dynamic checking below.
 const corsHeaders = {
-  'Access-Control-Allow-Origin': 'http://localhost:5173', // Or your specific frontend URL / '*' for development
+  // *** THIS IS THE LINE TO CHANGE/REVIEW ***
+  'Access-Control-Allow-Origin': VERCEL_PREVIEW_URL, // Allow requests from your Vercel preview deployment
+
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
+
+// --- (Optional but Recommended) Dynamic CORS Header Function ---
+/*
+// Uncomment this section and use dynamicCorsHeaders below for a more robust solution
+const allowedOrigins = [
+  VERCEL_PREVIEW_URL,
+  LOCALHOST_URL,
+  // Add your production URL here later
+];
+
+function getDynamicCorsHeaders(requestOrigin: string | null): HeadersInit {
+  const headers: HeadersInit = {
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  };
+  if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+    headers['Access-Control-Allow-Origin'] = requestOrigin; // Reflect the allowed origin
+  } else {
+    // Optionally handle disallowed origins, maybe default to first allowed?
+    // headers['Access-Control-Allow-Origin'] = allowedOrigins[0]; // Example fallback
+  }
+  return headers;
+}
+*/
+// --- End CORS Configuration ---
+
 
 const safetySettings = [
   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_MEDIUM_AND_ABOVE" },
@@ -26,16 +62,38 @@ const generationConfig = {
 serve(async (req: Request) => {
   console.log(`Incoming ${req.method} request to ${req.url}`);
 
+  // --- Decide which CORS headers to use ---
+  // Simple version (uses the hardcoded VERCEL_PREVIEW_URL for now):
+  const responseCorsHeaders = corsHeaders;
+
+  /*
+  // Dynamic version (use this if you uncommented the dynamic section above):
+  const origin = req.headers.get('Origin');
+  console.log("Request Origin:", origin);
+  const responseCorsHeaders = getDynamicCorsHeaders(origin);
+  // Important: Check if Access-Control-Allow-Origin was actually set if using dynamic
+  if (!responseCorsHeaders['Access-Control-Allow-Origin'] && req.method !== 'OPTIONS') {
+      console.warn(`Origin ${origin} not allowed by CORS policy.`);
+      return new Response(JSON.stringify({ error: 'Origin not allowed' }), {
+        status: 403, // Forbidden
+        headers: { 'Content-Type': 'application/json' }, // No CORS headers on forbidden response
+      });
+  }
+  */
+  // --- End CORS header selection ---
+
+
   if (req.method === 'OPTIONS') {
     console.log("Handling OPTIONS preflight");
-    return new Response(null, { headers: corsHeaders, status: 204 });
+    // Use the selected CORS headers for OPTIONS response
+    return new Response(null, { headers: responseCorsHeaders, status: 204 });
   }
 
   // --- Environment Variable Retrieval ---
   const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
   const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  const VERCEL_TEST_FUNCTION_URL = Deno.env.get('VERCEL_TEST_FUNCTION_URL'); // <-- Add this
+  const VERCEL_TEST_FUNCTION_URL = Deno.env.get('VERCEL_TEST_FUNCTION_URL');
 
   // --- Critical Environment Variable Check ---
   if (!GEMINI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -45,7 +103,8 @@ serve(async (req: Request) => {
       SUPABASE_SERVICE_ROLE_KEY_PRESENT: !!SUPABASE_SERVICE_ROLE_KEY
     });
     return new Response(JSON.stringify({ error: 'Server configuration error: Missing critical environment variables.', error_message: 'Server configuration error: Missing critical environment variables.'}), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      // Use the selected CORS headers for error responses
+      headers: { ...responseCorsHeaders, 'Content-Type': 'application/json' },
       status: 500
     });
   }
@@ -60,7 +119,8 @@ serve(async (req: Request) => {
       if (!contentType.includes('application/json')) {
         console.warn("Invalid content type received:", contentType);
         return new Response(JSON.stringify({ error: 'Invalid content type', error_message: 'Invalid content type' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          // Use the selected CORS headers
+          headers: { ...responseCorsHeaders, 'Content-Type': 'application/json' },
           status: 400
         });
       }
@@ -74,67 +134,72 @@ serve(async (req: Request) => {
 
       // --- Determine Video Source (Supabase or URL) ---
       if (uploadedVideoPath && typeof uploadedVideoPath === 'string') {
-        console.log("Processing Supabase uploaded video path:", uploadedVideoPath);
-        originalPathOrUrl = uploadedVideoPath;
-        processedVideoSourceType = 'supabase';
+         // ... (rest of your video processing logic remains the same) ...
+         console.log("Processing Supabase uploaded video path:", uploadedVideoPath);
+         originalPathOrUrl = uploadedVideoPath;
+         processedVideoSourceType = 'supabase';
 
-        const supabaseAdminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-        console.log("Supabase admin client initialized for uploaded video.");
+         const supabaseAdminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+         console.log("Supabase admin client initialized for uploaded video.");
 
-        // Try getting public URL first
-        const { data: publicUrlData, error: publicUrlError } = supabaseAdminClient.storage
-          .from('raw-videos')
-          .getPublicUrl(uploadedVideoPath);
+         // Try getting public URL first
+         const { data: publicUrlData, error: publicUrlError } = supabaseAdminClient.storage
+           .from('raw-videos')
+           .getPublicUrl(uploadedVideoPath);
 
-        if (publicUrlError || !publicUrlData?.publicUrl) {
-          console.log("Failed to get public URL, attempting signed URL for:", uploadedVideoPath, "Public URL Error:", publicUrlError?.message);
-          // Fallback to signed URL
-          const { data: signedUrlData, error: signedUrlError } = await supabaseAdminClient.storage
-            .from('raw-videos')
-            .createSignedUrl(uploadedVideoPath, 3600); // Signed URL valid for 1 hour
+         if (publicUrlError || !publicUrlData?.publicUrl) {
+           console.log("Failed to get public URL, attempting signed URL for:", uploadedVideoPath, "Public URL Error:", publicUrlError?.message);
+           // Fallback to signed URL
+           const { data: signedUrlData, error: signedUrlError } = await supabaseAdminClient.storage
+             .from('raw-videos')
+             .createSignedUrl(uploadedVideoPath, 3600); // Signed URL valid for 1 hour
 
-          if (signedUrlError || !signedUrlData?.signedUrl) {
-            console.error("Failed to get any accessible URL for Supabase video:", uploadedVideoPath, "Signed URL Error:", signedUrlError?.message);
-            throw new Error(`Failed to get accessible URL for video: ${uploadedVideoPath}. ${signedUrlError?.message || 'Unknown error'}`);
-          }
-          videoUriForGemini = signedUrlData.signedUrl;
-          console.log("Using signed URL for Supabase video (path only for brevity):", videoUriForGemini.substring(0, videoUriForGemini.indexOf('?') > -1 ? videoUriForGemini.indexOf('?') : 80));
-        } else {
-          videoUriForGemini = publicUrlData.publicUrl;
-          console.log("Using public URL for Supabase video:", videoUriForGemini);
-        }
+           if (signedUrlError || !signedUrlData?.signedUrl) {
+             console.error("Failed to get any accessible URL for Supabase video:", uploadedVideoPath, "Signed URL Error:", signedUrlError?.message);
+             throw new Error(`Failed to get accessible URL for video: ${uploadedVideoPath}. ${signedUrlError?.message || 'Unknown error'}`);
+           }
+           videoUriForGemini = signedUrlData.signedUrl;
+           console.log("Using signed URL for Supabase video (path only for brevity):", videoUriForGemini.substring(0, videoUriForGemini.indexOf('?') > -1 ? videoUriForGemini.indexOf('?') : 80));
+         } else {
+           videoUriForGemini = publicUrlData.publicUrl;
+           console.log("Using public URL for Supabase video:", videoUriForGemini);
+         }
 
       } else if (videoUrl && typeof videoUrl === 'string') {
-        console.log("Processing provided video URL:", videoUrl);
-        try { new URL(videoUrl); } catch (_) { // Basic URL validation
-            console.warn("Invalid videoUrl format received:", videoUrl);
-            return new Response(JSON.stringify({ error: 'Invalid videoUrl format.', error_message: 'Invalid videoUrl format.' }), {
-                headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400
-            });
-        }
-        videoUriForGemini = videoUrl;
-        originalPathOrUrl = videoUrl;
-        processedVideoSourceType = 'external_url';
-        console.log("Using provided external URL directly for Gemini:", videoUriForGemini);
+        // ... (rest of your video processing logic remains the same) ...
+         console.log("Processing provided video URL:", videoUrl);
+         try { new URL(videoUrl); } catch (_) { // Basic URL validation
+             console.warn("Invalid videoUrl format received:", videoUrl);
+             return new Response(JSON.stringify({ error: 'Invalid videoUrl format.', error_message: 'Invalid videoUrl format.' }), {
+                 headers: { ...responseCorsHeaders, 'Content-Type': 'application/json' }, status: 400
+             });
+         }
+         videoUriForGemini = videoUrl;
+         originalPathOrUrl = videoUrl;
+         processedVideoSourceType = 'external_url';
+         console.log("Using provided external URL directly for Gemini:", videoUriForGemini);
       } else {
         console.warn("Missing 'uploadedVideoPath' or 'videoUrl' in request body");
         return new Response(JSON.stringify({ error: 'Either uploadedVideoPath or videoUrl is required.', error_message: 'Either uploadedVideoPath or videoUrl is required.' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400
+          // Use the selected CORS headers
+          headers: { ...responseCorsHeaders, 'Content-Type': 'application/json' }, status: 400
         });
       }
 
       // --- Determine MIME Type ---
+       // ... (rest of your video processing logic remains the same) ...
       let mimeType = "video/mp4"; // Default
       const uriToCheck = videoUriForGemini.toLowerCase().split('?')[0];
       if (uriToCheck.endsWith(".mov")) mimeType = "video/quicktime";
       else if (uriToCheck.endsWith(".mpeg")) mimeType = "video/mpeg";
       else if (uriToCheck.endsWith(".avi")) mimeType = "video/x-msvideo";
       else if (uriToCheck.endsWith(".webm")) mimeType = "video/webm";
-      // else if (uriToCheck.endsWith(".mp4")) mimeType = "video/mp4"; // Already default
 
       console.log(`Using MIME type: ${mimeType} for URI: ${videoUriForGemini.substring(0,80)}...`);
 
+
       // --- Prepare Gemini Payload ---
+       // ... (rest of your video processing logic remains the same) ...
       const geminiPayload = {
         contents: [{
           parts: [
@@ -146,7 +211,9 @@ serve(async (req: Request) => {
         generationConfig: generationConfig,
       };
 
+
       // --- Call Gemini API ---
+       // ... (rest of your video processing logic remains the same) ...
       console.log("Sending request to Gemini. Payload fileUri (first 80 chars):", videoUriForGemini.substring(0,80));
       const geminiResponse = await fetch(GEMINI_API_URL, {
         method: 'POST',
@@ -170,7 +237,9 @@ serve(async (req: Request) => {
         console.log("Gemini API call successful.");
       }
 
+
       // --- Process Gemini Response ---
+       // ... (rest of your video processing logic remains the same) ...
       const geminiResult = JSON.parse(responseBodyText);
       const highlightsText = geminiResult.candidates?.[0]?.content?.parts?.[0]?.text;
 
@@ -182,7 +251,7 @@ serve(async (req: Request) => {
 
       let parsableText = highlightsText; // Keep original for error logging if needed
       try {
-        // Clean potential Markdown code blocks
+        // ... (rest of your video processing logic remains the same) ...
         parsableText = highlightsText.trim();
         if (parsableText.startsWith("```json")) {
           parsableText = parsableText.substring("```json".length);
@@ -198,39 +267,26 @@ serve(async (req: Request) => {
         const initialClips = JSON.parse(parsableText);
         console.log("Successfully parsed clips from Gemini response. Number of clips:", initialClips.length);
 
+
         // --------------------------------------------------
         // --- VERCEL TEST FUNCTION CALL (Start) ---
         // --------------------------------------------------
         if (VERCEL_TEST_FUNCTION_URL) {
-          console.log(`Attempting to test Vercel function at: ${VERCEL_TEST_FUNCTION_URL}`);
-          try {
-            // Make a simple GET request to the test URL
-            const testResponse = await fetch(VERCEL_TEST_FUNCTION_URL, { method: 'GET' });
+           // ... (Vercel test logic remains the same) ...
+           console.log(`Attempting to test Vercel function at: ${VERCEL_TEST_FUNCTION_URL}`);
+           try {
+             // Make a simple GET request to the test URL
+             const testResponse = await fetch(VERCEL_TEST_FUNCTION_URL, { method: 'GET' });
 
-            if (testResponse.ok) {
-              // Success! Log the status. You could potentially read the body too if needed.
-              console.log(`Vercel test function responded successfully with status: ${testResponse.status}`);
-              // Optional: Log the response body
-              // const testBody = await testResponse.text();
-              // console.log("Vercel test response body:", testBody);
-            } else {
-              // The Vercel function responded, but with an error status code.
-              console.warn(`Vercel test function responded with error status: ${testResponse.status}`);
-              // Optional: Log the error response body
-              // try {
-              //   const errorBody = await testResponse.text();
-              //   console.warn("Vercel test error response body:", errorBody);
-              // } catch (bodyError) {
-              //   console.warn("Could not read Vercel test error response body:", bodyError.message);
-              // }
-            }
-          } catch (testError: any) {
-            // Failed to connect to or execute the Vercel function (network error, DNS error, etc.)
-            console.error(`Failed to reach or execute Vercel test function: ${testError.message}`);
-            // Note: This error does NOT stop the main Supabase function from returning successfully.
-          }
+             if (testResponse.ok) {
+               console.log(`Vercel test function responded successfully with status: ${testResponse.status}`);
+             } else {
+               console.warn(`Vercel test function responded with error status: ${testResponse.status}`);
+             }
+           } catch (testError: any) {
+             console.error(`Failed to reach or execute Vercel test function: ${testError.message}`);
+           }
         } else {
-          // Log that the test was skipped because the URL wasn't provided.
           console.log("VERCEL_TEST_FUNCTION_URL environment variable not set, skipping Vercel function test call.");
         }
         // --------------------------------------------------
@@ -247,12 +303,13 @@ serve(async (req: Request) => {
             sourceType: processedVideoSourceType,
           }
         }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          // Use the selected CORS headers
+          headers: { ...responseCorsHeaders, 'Content-Type': 'application/json' },
           status: 200
         });
 
       } catch (parseError: any) {
-        // --- Handle JSON Parsing Error from Gemini Response ---
+         // ... (error handling logic remains the same) ...
         console.error("JSON parse error on highlightsText from Gemini:", parseError.message);
         console.error("Problematic highlightsText (raw):", highlightsText);
         console.error("Text that was attempted to be parsed:", parsableText);
@@ -262,14 +319,16 @@ serve(async (req: Request) => {
 
     } catch (error: any) {
       // --- Handle General Errors in POST Handler ---
+       // ... (error handling logic remains the same) ...
       console.error('Error in POST handler:', error.message);
       if (error.stack) console.error('Stack trace:', error.stack);
       else console.error('Full error object:', error);
       return new Response(JSON.stringify({
         error: `Internal Server Error: ${error.message}`,
-        error_message: error.message // Ensure error_message is included for client parsing
+        error_message: error.message
       }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        // Use the selected CORS headers
+        headers: { ...responseCorsHeaders, 'Content-Type': 'application/json' },
         status: 500
       });
     }
@@ -278,7 +337,8 @@ serve(async (req: Request) => {
   // --- Handle Non-POST Requests ---
   console.warn("Method not allowed:", req.method);
   return new Response(JSON.stringify({ error: 'Method not allowed', error_message: 'Method not allowed' }), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    // Use the selected CORS headers
+    headers: { ...responseCorsHeaders, 'Content-Type': 'application/json' },
     status: 405
   });
 });
