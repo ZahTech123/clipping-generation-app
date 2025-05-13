@@ -4,10 +4,12 @@
 export default function handler(req, res) {
   // The VERY FIRST line of executable code:
   try {
-    console.log("[HELLO_API_MINIMAL] Function handler invoked."); // Critical log
-    res.status(200).send("Hello from minimal API!");
+    console.log("[HELLO_API_MINIMAL] Function handler invoked. Sending JSON response.");
+    // Send a JSON response
+    res.status(200).json({ message: "Hello from minimal API!" }); // <-- Changed to .json()
   } catch (e) {
     console.error("[HELLO_API_MINIMAL_ERROR] Crash:", e);
-    res.status(500).send("Minimal API crashed.");
+    // Send a JSON error response
+    res.status(500).json({ error: "Minimal API crashed.", details: e.message }); // <-- Changed to .json()
   }
 }
