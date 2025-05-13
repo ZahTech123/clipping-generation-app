@@ -1,44 +1,49 @@
 import React, { useState, useRef } from 'react';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import './App.css'; // Make sure you have some basic styling
+import './App.css';
 
-// Initialize Supabase Client (Replace with your actual URL and Anon Key)
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.error("Supabase URL and Anon Key are required. Please set them in your .env file (VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY)");
-  alert("Supabase URL and Anon Key are required. Please check console and .env settings.");
-}
+// ... (Supabase client initialization remains the same) ...
 // @ts-ignore createClient can accept undefined but we want to ensure they are set.
 const supabase: SupabaseClient = createClient(supabaseUrl!, supabaseAnonKey!);
 
+
 interface Clip {
   id: string;
-  startTime: number; // Changed from 'start' to match Gemini's expected output from prompt
-  endTime: number;   // Changed from 'end' to match Gemini's expected output from prompt
+  startTime: number;
+  endTime: number;
   description: string;
   transcription: string;
-  clipUrl?: string; // URL to the processed clip
+  clipUrl?: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
   error?: string;
 }
 
-interface InitialClipData { // Structure from Gemini
+interface InitialClipData {
   startTime: number;
   endTime: number;
   description: string;
   transcription: string;
 }
 
+// NEW: Interface for processed video details
+interface ProcessedVideoDetails {
+    pathOrUrl: string;
+    sourceType: 'supabase' | 'external_url';
+}
+
 function App() {
-  const [videoUrlInput, setVideoUrlInput] = useState<string>(''); // Renamed from youtubeUrl for clarity
+  const [videoUrlInput, setVideoUrlInput] = useState<string>('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [processing, setProcessing] = useState<boolean>(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [clips, setClips] = useState<Clip[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [inputType, setInputType] = useState<'url' | 'upload'>('url');
+  // NEW State: Store details of the video processed by the function
+  const [processedVideoDetails, setProcessedVideoDetails] = useState<ProcessedVideoDetails | null>(null);
+  // NEW State: Track if analysis is complete to show download button
+  const [analysisComplete, setAnalysisComplete] = useState<boolean>(false);
+
 
   const addLog = (message: string) => {
     console.log(message);
@@ -46,31 +51,63 @@ function App() {
   };
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    // ... (file change logic remains the same) ...
     if (event.target.files && event.target.files[0]) {
-      const file = event.target.files[0];
-      // Example: Limit file size to 900MB (adjust as needed by Supabase/FFMPEG function)
-      if (file.size > 900 * 1024 * 1024) { 
-        addLog(`Error: File size exceeds 900MB limit. Selected file is ${(file.size / (1024 * 1024)).toFixed(2)} MB`);
+        const file = event.target.files[0];
+        if (file.size > 900 * 1024 * 1024) {
+          addLog(`Error: File size exceeds 900MB limit. Selected file is ${(file.size / (1024 * 1024)).toFixed(2)} MB`);
+          setSelectedFile(null);
+          if (fileInputRef.current) fileInputRef.current.value = "";
+          return;
+        }
+        setSelectedFile(file);
+        setProcessedVideoDetails(null); // Clear previous processed details on new selection
+        setAnalysisComplete(false);     // Reset analysis status
+        addLog(`File selected: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
+      } else {
         setSelectedFile(null);
-        if (fileInputRef.current) fileInputRef.current.value = "";
-        return;
       }
-      setSelectedFile(file);
-      addLog(`File selected: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
-    } else {
-      setSelectedFile(null);
+  };
+
+  // NEW: Handler for the download button
+  const handleDownloadOriginal = () => {
+    if (!processedVideoDetails) {
+        addLog('Error: No processed video details available for download.');
+        return;
     }
+    addLog('Initiating download of original video...');
+    const { pathOrUrl, sourceType } = processedVideoDetails;
+
+    // Construct the URL for the Vercel download function
+    const downloadApiUrl = `/api/download-video`;
+    const params = new URLSearchParams({
+        sourceType: sourceType,
+        identifier: pathOrUrl, // Send the path or URL as 'identifier'
+    });
+
+    const fullDownloadUrl = `${downloadApiUrl}?${params.toString()}`;
+    addLog(`Requesting download from: ${fullDownloadUrl}`);
+
+    // Open the URL in a new tab/window - the Vercel function will handle the download trigger
+    // Using window.location.href might work too, but new tab is often safer for downloads
+    window.open(fullDownloadUrl, '_blank');
+
+    // Alternatively, use window.location.href if you prefer staying in the same tab
+    // window.location.href = fullDownloadUrl;
   };
 
   const handleSubmit = async () => {
     setProcessing(true);
     setLogs([]);
     setClips([]);
+    setProcessedVideoDetails(null); // Clear previous details
+    setAnalysisComplete(false);     // Reset analysis status
     addLog('Starting video processing flow...');
 
     let videoIdentifierForFunction: { type: 'url', value: string } | { type: 'storagePath', value: string };
 
     try {
+      // ... (logic for determining videoIdentifierForFunction remains the same) ...
       if (inputType === 'url' && videoUrlInput) {
         addLog(`Processing Video URL: ${videoUrlInput}`);
         videoIdentifierForFunction = { type: 'url', value: videoUrlInput };
@@ -85,8 +122,8 @@ function App() {
           .from('raw-videos') // Your bucket for raw uploads
           .upload(fileName, selectedFile, {
             cacheControl: '3600',
-            upsert: false, // Set to true if you want to allow overwriting
-            contentType: selectedFile.type || 'video/mp4', // Provide a default if type is missing
+            upsert: false,
+            contentType: selectedFile.type || 'video/mp4',
           });
 
         if (uploadError) {
@@ -109,8 +146,8 @@ function App() {
 
       const { data: processResponse, error: processError } = await supabase.functions.invoke<{
         message: string;
-        initialClips: InitialClipData[]; // Typed to match expected Gemini output
-        processedVideoDetails: { pathOrUrl: string; sourceType: 'supabase' | 'external_url' };
+        initialClips: InitialClipData[];
+        processedVideoDetails: ProcessedVideoDetails; // Use the interface
       }>(
         'process-video',
         { body: functionPayload }
@@ -120,17 +157,12 @@ function App() {
       addLog(`'process-video' function raw error: ${JSON.stringify(processError)}`);
 
       if (processError) {
+        // ... (error handling remains the same) ...
         let detailedErrorMessage = processError.message;
-        // @ts-ignore Supabase error context can be complex
-        if (processError.context && typeof processError.context.body === 'string') {
-            try { // @ts-ignore
-                const errorBody = JSON.parse(processError.context.body);
-                detailedErrorMessage += ` Server detail: ${errorBody.error_message || errorBody.error || JSON.stringify(errorBody)}`;
-            } catch (e) { /* ignore */ }
         // @ts-ignore
-        } else if (processError.context && processError.context.status) { // @ts-ignore
-             detailedErrorMessage += ` (Status: ${processError.context.status})`;
-        }
+        if (processError.context && typeof processError.context.body === 'string') { try { const errorBody = JSON.parse(processError.context.body); detailedErrorMessage += ` Server detail: ${errorBody.error_message || errorBody.error || JSON.stringify(errorBody)}`; } catch (e) { /* ignore */ } }
+        // @ts-ignore
+        else if (processError.context && processError.context.status) { detailedErrorMessage += ` (Status: ${processError.context.status})`; }
         throw new Error(`'process-video' Edge Function error: ${detailedErrorMessage}`);
       }
 
@@ -142,82 +174,43 @@ function App() {
       addLog("'process-video' function completed. Received potential clips metadata.");
       const initialClipsData: InitialClipData[] = processResponse.initialClips;
       const clipsWithStatus: Clip[] = initialClipsData.map((clip, index) => ({
-        ...clip, // startTime, endTime, description, transcription come from Gemini
+        ...clip,
         id: `clip-${Date.now()}-${index}`,
-        status: 'pending',
+        status: 'pending', // Keep as pending, we won't process them yet
       }));
-      setClips(clipsWithStatus);
+      setClips(clipsWithStatus); // Show the potential clips identified
+      setProcessedVideoDetails(processResponse.processedVideoDetails); // Store the details needed for download
+      setAnalysisComplete(true); // Mark analysis as complete
 
-      // --- Now, for each clip, invoke the 'trim-video' Edge Function ---
+      addLog("Analysis complete. Original video is ready for download.");
+      addLog(`Video Source Type: ${processResponse.processedVideoDetails.sourceType}, Identifier: ${processResponse.processedVideoDetails.pathOrUrl}`);
+
+      // --- !!! TEMPORARILY COMMENT OUT THE TRIM-VIDEO CALLS !!! ---
+      /*
       addLog(`Starting to process ${clipsWithStatus.length} potential clips sequentially...`);
       const finalClips: Clip[] = [];
       for (const clipData of clipsWithStatus) {
-        // Update UI for the current clip being processed
-        setClips(prev => prev.map(c => c.id === clipData.id ? { ...c, status: 'processing' } : c));
-        try {
-          addLog(`Invoking 'trim-video' for clip: "${clipData.description}" (Start: ${clipData.startTime}s, End: ${clipData.endTime}s)`);
-
-          const trimFunctionPayload = {
-            videoIdentifier: processResponse.processedVideoDetails.pathOrUrl,
-            sourceType: processResponse.processedVideoDetails.sourceType,
-            highlight: {
-              start: clipData.startTime, // Use startTime
-              end: clipData.endTime,     // Use endTime
-              transcription: clipData.transcription,
-              description: clipData.description,
-            },
-          };
-          addLog(`'trim-video' function payload: ${JSON.stringify(trimFunctionPayload)}`);
-
-          const { data: trimResponse, error: trimError } = await supabase.functions.invoke<{ clipUrl: string }>(
-            'trim-video',
-            { body: trimFunctionPayload }
-          );
-          
-          addLog(`'trim-video' raw response for "${clipData.description}": ${JSON.stringify(trimResponse)}`);
-          addLog(`'trim-video' raw error for "${clipData.description}": ${JSON.stringify(trimError)}`);
-
-          if (trimError) {
-            let detailedTrimErrorMessage = trimError.message;
-            // @ts-ignore
-            if (trimError.context && typeof trimError.context.body === 'string') { // @ts-ignore
-                try { const errorBody = JSON.parse(trimError.context.body); detailedTrimErrorMessage += ` Server detail: ${errorBody.error_message || errorBody.error || JSON.stringify(errorBody)}`; } catch (e) { /* Ignore */ }
-            // @ts-ignore
-            } else if (trimError.context && trimError.context.status) { detailedTrimErrorMessage += ` (Status: ${trimError.context.status})`; }
-            throw new Error(`'trim-video' for "${clipData.description}" failed: ${detailedTrimErrorMessage}`);
-          }
-
-          if (!trimResponse || !trimResponse.clipUrl) {
-            throw new Error(`'trim-video' for "${clipData.description}" did not return clipUrl.`);
-          }
-
-          addLog(`Clip processed: "${clipData.description}", URL: ${trimResponse.clipUrl}`);
-          const completedClip = { ...clipData, clipUrl: trimResponse.clipUrl, status: 'completed' as const };
-          finalClips.push(completedClip);
-          setClips(prev => prev.map(c => c.id === clipData.id ? completedClip : c));
-
-        } catch (trimClipError: any) {
-          addLog(`Error processing clip "${clipData.description}": ${trimClipError.message}`);
-          const failedClip = { ...clipData, status: 'failed' as const, error: trimClipError.message };
-          finalClips.push(failedClip);
-          setClips(prev => prev.map(c => c.id === clipData.id ? failedClip : c));
-        }
+        // ... (rest of the trim-video loop) ...
       }
       addLog("All clips processing attempted.");
+      */
+      // --- End of commented out section ---
 
     } catch (error: any) {
       addLog(`Error in processing flow: ${error.message}`);
       console.error("Full error object in processing flow:", error);
-      setClips(prev => prev.map(c => 
-        (c.status === 'pending' || c.status === 'processing') 
-          ? { ...c, status: 'failed', error: "Main process failed or was interrupted. Check logs." } 
+       setAnalysisComplete(false); // Ensure analysis complete is false on error
+      setClips(prev => prev.map(c =>
+        (c.status === 'pending' || c.status === 'processing')
+          ? { ...c, status: 'failed', error: "Main process failed or was interrupted. Check logs." }
           : c
       ));
     } finally {
       setProcessing(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      setSelectedFile(null);
-      // setVideoUrlInput(''); // Optionally clear
+      // Don't clear inputs here, user might want to download
+      // if (fileInputRef.current) fileInputRef.current.value = "";
+      // setSelectedFile(null);
+      // setVideoUrlInput('');
     }
   };
 
@@ -230,46 +223,63 @@ function App() {
       <main>
         <div className="input-section card">
           <h2>1. Provide Video</h2>
-          <div className="input-type-selector">
-            <label>
-              <input type="radio" name="inputType" value="url" checked={inputType === 'url'} onChange={() => setInputType('url')} disabled={processing} />
-              Video URL (e.g., direct MP4, MOV link)
-            </label>
-            <label>
-              <input type="radio" name="inputType" value="upload" checked={inputType === 'upload'} onChange={() => setInputType('upload')} disabled={processing} />
-              Upload File (Max 900MB)
-            </label>
-          </div>
+          {/* ... (input type selector, URL input, file input remain the same) ... */}
+           <div className="input-type-selector">
+             <label>
+               <input type="radio" name="inputType" value="url" checked={inputType === 'url'} onChange={() => { setInputType('url'); setProcessedVideoDetails(null); setAnalysisComplete(false); }} disabled={processing} />
+               Video URL (e.g., YouTube, direct MP4 link)
+             </label>
+             <label>
+               <input type="radio" name="inputType" value="upload" checked={inputType === 'upload'} onChange={() => { setInputType('upload'); setProcessedVideoDetails(null); setAnalysisComplete(false); }} disabled={processing} />
+               Upload File (Max 900MB)
+             </label>
+           </div>
 
-          {inputType === 'url' && (
-            <input
-              type="text"
-              placeholder="Enter direct video URL (MP4, MOV, etc.)"
-              value={videoUrlInput}
-              onChange={(e) => setVideoUrlInput(e.target.value)}
-              disabled={processing}
-              style={{width: '90%', padding: '10px', margin: '10px 0'}}
-            />
-          )}
-          {inputType === 'upload' && (
-            <input
-              type="file"
-              accept="video/*"
-              onChange={handleFileChange}
-              ref={fileInputRef}
-              disabled={processing}
-              style={{margin: '10px 0'}}
-            />
-          )}
+           {inputType === 'url' && (
+             <input
+               type="text"
+               placeholder="Enter YouTube or direct video URL (MP4, MOV, etc.)"
+               value={videoUrlInput}
+               onChange={(e) => { setVideoUrlInput(e.target.value); setProcessedVideoDetails(null); setAnalysisComplete(false); }}
+               disabled={processing}
+               style={{width: '90%', padding: '10px', margin: '10px 0'}}
+             />
+           )}
+           {inputType === 'upload' && (
+             <input
+               type="file"
+               accept="video/*"
+               onChange={handleFileChange}
+               ref={fileInputRef}
+               disabled={processing}
+               style={{margin: '10px 0'}}
+             />
+           )}
           <button onClick={handleSubmit} disabled={processing || (inputType === 'url' && !videoUrlInput) || (inputType === 'upload' && !selectedFile)}>
-            {processing ? 'Processing...' : 'Generate Clips'}
+            {processing ? 'Analyzing...' : 'Analyze Video'} {/* Changed button text */}
           </button>
         </div>
 
+        {/* NEW: Download Section */}
+        {analysisComplete && processedVideoDetails && !processing && (
+            <div className="download-section card">
+                <h2>2. Download Original</h2>
+                <p>Analysis complete. You can now download the original video.</p>
+                <button onClick={handleDownloadOriginal}>
+                    Download Original Video
+                </button>
+                <p style={{fontSize: '0.8em', marginTop: '10px'}}>
+                   Source: {processedVideoDetails.sourceType} <br/>
+                   Identifier: {processedVideoDetails.pathOrUrl.length > 60 ? processedVideoDetails.pathOrUrl.substring(0, 60) + '...' : processedVideoDetails.pathOrUrl}
+                </p>
+            </div>
+        )}
+
         <div className="results-section card">
-          <h2>2. Processing Logs</h2>
+          {/* Adjusted section numbering */}
+          <h2>{analysisComplete && processedVideoDetails ? '3.' : '2.'} Processing Logs</h2>
           <div className="logs">
-            {logs.length === 0 && !processing && <p>No logs yet. Submit a video to start.</p>}
+            {logs.length === 0 && !processing && <p>No logs yet. Submit a video to start analysis.</p>}
             {logs.map((log, index) => (
               <p key={index} className={log.toLowerCase().includes('error') ? 'log-error' : ''}>{log}</p>
             ))}
@@ -277,30 +287,26 @@ function App() {
         </div>
 
         <div className="results-section card">
-          <h2>3. Highlighted Clips</h2>
+           {/* Adjusted section numbering */}
+          <h2>{analysisComplete && processedVideoDetails ? '4.' : '3.'} Potential Clips Identified</h2>
           {clips.length > 0 && (
             <ul className="clips-list">
               {clips.map((clip) => (
+                // Keep displaying clips, but status will remain 'pending'
                 <li key={clip.id} className={`clip-item status-${clip.status}`}>
                   <strong>Description:</strong> {clip.description} <br />
                   <strong>Timestamps:</strong> {clip.startTime}s - {clip.endTime}s <br />
                   <strong>Transcription:</strong> {clip.transcription || "N/A"} <br />
                   <strong>Status:</strong> <span className={`status-badge status-${clip.status}`}>{clip.status}</span>
-                  {clip.clipUrl && (
-                    <>
-                      <br />
-                      <a href={clip.clipUrl} target="_blank" rel="noopener noreferrer" className="download-link">
-                        View/Download Clip
-                      </a>
-                    </>
-                  )}
+                  {/* No download link for clips yet */}
                   {clip.error && <p className="error-message">Error: {clip.error}</p>}
                 </li>
               ))}
             </ul>
           )}
-          {processing && clips.length === 0 && logs.length > 0 && <p>Analyzing video and identifying potential clips... This may take a few minutes for longer videos.</p>}
-          {!processing && clips.length === 0 && logs.length > 0 && <p>Processing finished. If no clips were generated, the video might not have yielded suitable clips, or an error occurred during analysis. Please check logs.</p>}
+          {processing && logs.length > 0 && <p>Analyzing video and identifying potential clips...</p>}
+          {!processing && analysisComplete && clips.length === 0 && <p>Analysis finished, but no suitable clips were identified in the video.</p>}
+          {!processing && !analysisComplete && logs.length > 0 && <p>Analysis failed. Please check logs.</p>}
         </div>
       </main>
     </div>

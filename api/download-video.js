@@ -150,7 +150,7 @@ export default async function handler(req, res) {
             res.status(500).json({ error: `Internal Server Error: ${error.message}` });
         } else {
             // If headers sent, just try to end the response abruptly if possible
-             res.end();
+             res.end();s
         }
     }
 }
