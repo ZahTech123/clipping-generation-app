@@ -1,60 +1,62 @@
 // File: clipping-generation-app/api/download-video.js
 import { createClient } from '@supabase/supabase-js';
 import ytdl from 'ytdl-core';
-import { Writable } from 'stream'; // Import Writable for pipe method typing
+// import { Writable } from 'stream'; // Writable import is not strictly needed for res.pipe
 
 // Initialize Supabase Client (using environment variables set in Vercel)
-// IMPORTANT: Use Anon Key if possible for downloading public/signed URLs.
-// Use Service Role Key ONLY if necessary and understand the security implications.
-const supabaseUrl = process.env.VITE_SUPABASE_URL; // Use the same env var name as your frontend for consistency
-const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY; // Prefer Anon key
+const supabaseUrl = process.env.VITE_SUPABASE_URL;
+const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY; // Prefer Anon key for this
 
 if (!supabaseUrl || !supabaseKey) {
-    console.error("Supabase URL and Key environment variables are required for the download function.");
-    // Don't throw here, let the handler fail gracefully
+    console.error("DOWNLOAD_VIDEO_FUNCTION: Supabase URL and Key environment variables are required.");
+    // This state will be caught by the handler's check below
 }
 
 // Helper to extract a basic filename
 function getFilename(identifier, sourceType) {
+    let filename = `video_download_${Date.now()}.mp4`; // Default
     try {
         if (sourceType === 'supabase') {
             const parts = identifier.split('/');
-            return parts[parts.length - 1] || `video_${Date.now()}.mp4`;
-        }
-        if (sourceType === 'external_url') {
-            const url = new URL(identifier);
+            filename = parts[parts.length - 1] || `video_${Date.now()}.mp4`;
+        } else if (sourceType === 'external_url') {
+            const url = new URL(identifier); // This can throw if identifier is not a valid URL
             const pathParts = url.pathname.split('/');
             const lastPart = pathParts[pathParts.length - 1];
-            // Basic check if it looks like a filename with extension
-            if (lastPart && lastPart.includes('.')) {
-                return lastPart;
-            }
-            // Fallback for YouTube or URLs without clear filenames
-            if (ytdl.validateURL(identifier)) {
-                // Note: Getting title might require an async call, keeping it simple for now
+
+            if (lastPart && lastPart.includes('.')) { // Check if it looks like a filename with extension
+                filename = decodeURIComponent(lastPart); // Decode URI components in filename
+            } else if (ytdl.validateURL(identifier)) {
                 const videoId = ytdl.getVideoID(identifier);
-                return `youtube_${videoId || Date.now()}.mp4`;
+                // Fetching actual YouTube title is async, for simplicity using ID
+                filename = `youtube_${videoId || Date.now()}.mp4`;
+            } else {
+                // Fallback for URLs without clear filename in path
+                filename = `external_video_${Date.now()}.mp4`;
             }
         }
     } catch (e) {
-        console.warn("Error parsing identifier for filename:", e);
+        console.warn("DOWNLOAD_VIDEO_FUNCTION: Error parsing identifier for filename:", identifier, e.message);
     }
-    // Default fallback
-    return `video_download_${Date.now()}.mp4`;
+    // Sanitize filename to prevent issues
+    return filename.replace(/[^a-zA-Z0-9_.-]/g, '_').replace(/_{2,}/g, '_');
 }
 
 
 export default async function handler(req, res) {
+    console.log(`[DOWNLOAD_VIDEO] Request received: ${req.method} ${req.url}`);
+
     // Check Supabase config availability early
     if (!supabaseUrl || !supabaseKey) {
+        console.error("[DOWNLOAD_VIDEO] Server configuration error: Supabase credentials missing in environment.");
         res.status(500).json({ error: "Server configuration error: Supabase credentials missing." });
         return;
     }
+    // Initialize Supabase client here, after check, to avoid error if env vars are missing.
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-
-    // Use GET method for simplicity with query parameters
     if (req.method !== 'GET') {
+        console.log(`[DOWNLOAD_VIDEO] Method ${req.method} not allowed.`);
         res.setHeader('Allow', ['GET']);
         res.status(405).end(`Method ${req.method} Not Allowed`);
         return;
@@ -63,94 +65,108 @@ export default async function handler(req, res) {
     const { sourceType, identifier } = req.query;
 
     if (!sourceType || !identifier) {
+        console.log("[DOWNLOAD_VIDEO] Missing 'sourceType' or 'identifier' query parameters.");
         res.status(400).json({ error: "Missing 'sourceType' or 'identifier' query parameters." });
         return;
     }
 
-    const decodedIdentifier = decodeURIComponent(identifier); // Should already be decoded by framework, but good practice
-    const filename = getFilename(decodedIdentifier, sourceType);
+    // decodedIdentifier is usually handled by the framework, but being explicit is fine.
+    const decodedIdentifier = typeof identifier === 'string' ? decodeURIComponent(identifier) : '';
+    if (!decodedIdentifier) {
+        console.log("[DOWNLOAD_VIDEO] Invalid 'identifier' query parameter after decoding.");
+        res.status(400).json({ error: "Invalid 'identifier' query parameter." });
+        return;
+    }
 
-    console.log(`Download request received: sourceType=${sourceType}, identifier=${decodedIdentifier.substring(0, 60)}...`);
+    const filenameToUse = getFilename(decodedIdentifier, sourceType);
+    console.log(`[DOWNLOAD_VIDEO] Processing download: sourceType=${sourceType}, identifier (start)=${decodedIdentifier.substring(0, 60)}..., filename=${filenameToUse}`);
 
     try {
         if (sourceType === 'external_url') {
-            // --- Handle External URL (YouTube or Direct) ---
             if (ytdl.validateURL(decodedIdentifier)) {
-                console.log("Identified as YouTube URL. Attempting to stream with ytdl-core.");
+                console.log("[DOWNLOAD_VIDEO] Identified as YouTube URL. Attempting to stream with ytdl-core.");
                 try {
-                    const info = await ytdl.getInfo(decodedIdentifier);
-                    // Simple approach: find a format with both audio and video
-                    const format = ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
-                    if (!format) {
-                         console.warn("No suitable audio+video format found, trying video only.");
-                         const videoOnlyFormat = ytdl.chooseFormat(info.formats, { quality: 'highestvideo' });
-                         if (!videoOnlyFormat) throw new Error("Could not find a suitable download format.");
-                         // Note: This might result in video without audio
-                         console.log(`Streaming video only format: ${videoOnlyFormat.container}`);
-                         res.setHeader('Content-Type', videoOnlyFormat.mimeType || 'video/mp4');
-                         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`); // Use derived filename
-                         ytdl(decodedIdentifier, { format: videoOnlyFormat }).pipe(res);
-
-                    } else {
-                        console.log(`Streaming format: ${format.container}, Quality: ${format.qualityLabel}`);
-                        res.setHeader('Content-Type', format.mimeType || 'video/mp4');
-                        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`); // Use derived filename
-                        ytdl(decodedIdentifier, { format: format }).pipe(res);
-                    }
-
-                    // Handle errors during the pipe
-                    // Note: Vercel might handle stream errors, but explicit handling is safer
-                    res.on('error', (streamErr) => {
-                       console.error("Error piping YouTube stream to response:", streamErr);
-                       // Don't try to write headers/status if already sent
+                    // It's good practice to ensure headers are set before starting the pipe
+                    res.setHeader('Content-Type', 'video/mp4'); // Default to mp4, ytdl-core might provide more specific
+                    res.setHeader('Content-Disposition', `attachment; filename="${filenameToUse}"`);
+                    
+                    const videoStream = ytdl(decodedIdentifier, {
+                        quality: 'highestaudioandvideo', // Request a format with both
+                        // filter: 'audioandvideo', // Alternative way to specify
                     });
 
+                    videoStream.on('info', (info, format) => {
+                        console.log(`[DOWNLOAD_VIDEO] ytdl-core info: Title: ${info.videoDetails.title}, Format container: ${format.container}`);
+                        // Optionally update Content-Type if format provides a more specific one
+                        if (format.mimeType) {
+                            res.setHeader('Content-Type', format.mimeType);
+                            console.log(`[DOWNLOAD_VIDEO] Updated Content-Type to: ${format.mimeType}`);
+                        }
+                    });
+
+                    videoStream.on('error', (streamErr) => {
+                       console.error("[DOWNLOAD_VIDEO] Error during ytdl stream:", streamErr.message);
+                       // If headers haven't been sent, we can try to send an error status
+                       if (!res.headersSent) {
+                           res.status(500).json({ error: `Error streaming video: ${streamErr.message}` });
+                       } else {
+                           // If headers are sent, the stream is likely broken. End the response.
+                           res.end();
+                       }
+                    });
+                    
+                    videoStream.pipe(res);
 
                 } catch (ytdlError) {
-                    console.error("ytdl-core error:", ytdlError);
-                    res.status(500).json({ error: `Failed to process YouTube URL: ${ytdlError.message}` });
+                    console.error("[DOWNLOAD_VIDEO] ytdl-core processing error:", ytdlError);
+                    if (!res.headersSent) {
+                        res.status(500).json({ error: `Failed to process YouTube URL: ${ytdlError.message}` });
+                    }
                 }
             } else {
                 // --- Handle Direct URL (Non-YouTube) ---
-                console.log("Identified as Direct URL. Redirecting user.");
-                // Redirecting is generally better than proxying large files through the function
-                // 307 Temporary Redirect preserves the method (GET)
-                res.redirect(307, decodedIdentifier);
+                console.log("[DOWNLOAD_VIDEO] Identified as Direct URL. Redirecting user to:", decodedIdentifier);
+                // For direct file URLs, redirecting is often the simplest and most efficient.
+                // The browser will handle the download based on the target server's headers.
+                res.redirect(307, decodedIdentifier); // 307 Temporary Redirect
             }
 
         } else if (sourceType === 'supabase') {
             // --- Handle Supabase Storage Path ---
-            console.log(`Generating signed URL for Supabase path: ${decodedIdentifier}`);
+            console.log(`[DOWNLOAD_VIDEO] Generating signed URL for Supabase path: ${decodedIdentifier}`);
+            // Ensure 'raw-videos' matches your bucket name
             const { data, error } = await supabase.storage
-                .from('raw-videos') // Make sure this matches the bucket you uploaded to
-                .createSignedUrl(decodedIdentifier, 300, { // 300 seconds (5 minutes) validity
-                    download: true // Force download behavior with Content-Disposition
+                .from('raw-videos')
+                .createSignedUrl(decodedIdentifier, 300, { // Signed URL valid for 300 seconds (5 minutes)
+                    download: true // This crucial option tells Supabase to set Content-Disposition for download
                 });
 
             if (error) {
-                console.error("Supabase signed URL error:", error);
+                console.error("[DOWNLOAD_VIDEO] Supabase signed URL generation error:", error);
                 throw new Error(`Failed to get download URL from Supabase: ${error.message}`);
             }
 
             if (!data || !data.signedUrl) {
+                 console.error("[DOWNLOAD_VIDEO] Supabase did not return a signed URL.");
                  throw new Error("Supabase did not return a signed URL.");
             }
 
-            console.log("Redirecting user to Supabase signed URL.");
-            res.redirect(307, data.signedUrl); // Redirect user to the download URL
+            console.log("[DOWNLOAD_VIDEO] Redirecting user to Supabase signed download URL.");
+            res.redirect(307, data.signedUrl); // Redirect user to the Supabase URL
 
         } else {
+            console.log(`[DOWNLOAD_VIDEO] Invalid sourceType received: ${sourceType}`);
             res.status(400).json({ error: `Invalid sourceType: ${sourceType}` });
         }
 
     } catch (error) {
-        console.error(`Error in download function (sourceType: ${sourceType}):`, error);
-        // Avoid sending headers again if they were already partially sent (e.g., during streaming)
+        console.error(`[DOWNLOAD_VIDEO] General error in download function (sourceType: ${sourceType}):`, error.message, error.stack);
         if (!res.headersSent) {
             res.status(500).json({ error: `Internal Server Error: ${error.message}` });
         } else {
-            // If headers sent, just try to end the response abruptly if possible
-             res.end();s
+            // If headers were already sent (e.g., during a failed stream), just end the response.
+            console.log("[DOWNLOAD_VIDEO] Headers already sent, ending response due to error.");
+            res.end(); // Corrected: no extra 's'
         }
     }
 }
