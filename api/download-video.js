@@ -1,6 +1,7 @@
 // File: clipping-generation-app/api/download-video.js
 import { createClient } from '@supabase/supabase-js';
-import ytdl from 'ytdl-core';
+// import ytdl from 'ytdl-core'; // No longer needed
+import { spawn } from 'child_process'; // Import spawn for running external commands
 // import { Writable } from 'stream'; // Writable import is not strictly needed for res.pipe
 
 // Initialize Supabase Client (using environment variables set in Vercel)
@@ -24,22 +25,29 @@ function getFilename(identifier, sourceType) {
             const pathParts = url.pathname.split('/');
             const lastPart = pathParts[pathParts.length - 1];
 
-            if (lastPart && lastPart.includes('.')) { // Check if it looks like a filename with extension
-                filename = decodeURIComponent(lastPart); // Decode URI components in filename
-            } else if (ytdl.validateURL(identifier)) {
-                const videoId = ytdl.getVideoID(identifier);
-                // Fetching actual YouTube title is async, for simplicity using ID
+            if (lastPart && lastPart.includes('.') && !identifier.includes('youtube.com/') && !identifier.includes('youtu.be/')) { // Check if it looks like a filename with extension, EXCLUDING youtube urls
+                filename = decodeURIComponent(lastPart); 
+            } else if (identifier.includes('youtube.com/') || identifier.includes('youtu.be/')) {
+                // For YouTube URLs, we'll rely on yt-dlp to suggest a filename later if possible,
+                // but provide a fallback based on a simple pattern or ID.
+                const videoIdMatch = identifier.match(/[?&]v=([^&]+)|youtu\.be\/([^?&]+)/);
+                const videoId = videoIdMatch ? (videoIdMatch[1] || videoIdMatch[2]) : null;
                 filename = `youtube_${videoId || Date.now()}.mp4`;
             } else {
-                // Fallback for URLs without clear filename in path
+                // Fallback for other URLs without clear filename in path
                 filename = `external_video_${Date.now()}.mp4`;
             }
         }
     } catch (e) {
         console.warn("DOWNLOAD_VIDEO_FUNCTION: Error parsing identifier for filename:", identifier, e.message);
     }
-    // Sanitize filename to prevent issues
+    // Sanitize filename
     return filename.replace(/[^a-zA-Z0-9_.-]/g, '_').replace(/_{2,}/g, '_');
+}
+
+// Basic check if a URL looks like a YouTube URL
+function isYouTubeURL(url) {
+    return url.includes('youtube.com/') || url.includes('youtu.be/');
 }
 
 
@@ -83,46 +91,58 @@ export default async function handler(req, res) {
 
     try {
         if (sourceType === 'external_url') {
-            if (ytdl.validateURL(decodedIdentifier)) {
-                console.log("[DOWNLOAD_VIDEO] Identified as YouTube URL. Attempting to stream with ytdl-core.");
-                try {
-                    // It's good practice to ensure headers are set before starting the pipe
-                    res.setHeader('Content-Type', 'video/mp4'); // Default to mp4, ytdl-core might provide more specific
-                    res.setHeader('Content-Disposition', `attachment; filename="${filenameToUse}"`);
-                    
-                    const videoStream = ytdl(decodedIdentifier, {
-                        quality: 'highestaudioandvideo', // Request a format with both
-                        // filter: 'audioandvideo', // Alternative way to specify
-                    });
+            // --- Use yt-dlp for YouTube URLs --- 
+            if (isYouTubeURL(decodedIdentifier)) {
+                console.log("[DOWNLOAD_VIDEO] Identified as YouTube URL. Attempting to stream with yt-dlp.");
+                
+                res.setHeader('Content-Type', 'video/mp4'); // Set default type
+                res.setHeader('Content-Disposition', `attachment; filename="${filenameToUse}"`);
 
-                    videoStream.on('info', (info, format) => {
-                        console.log(`[DOWNLOAD_VIDEO] ytdl-core info: Title: ${info.videoDetails.title}, Format container: ${format.container}`);
-                        // Optionally update Content-Type if format provides a more specific one
-                        if (format.mimeType) {
-                            res.setHeader('Content-Type', format.mimeType);
-                            console.log(`[DOWNLOAD_VIDEO] Updated Content-Type to: ${format.mimeType}`);
+                // yt-dlp arguments:
+                // -f bestvideo+bestaudio/best: Get best quality video and audio muxed, or best overall if separate not available
+                // --no-playlist: Prevent downloading whole playlist if URL is part of one
+                // -o -: Output video data to standard output (stdout)
+                // decodedIdentifier: The YouTube URL
+                const ytDlpProcess = spawn('yt-dlp', [
+                    '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', // Prefer mp4 container
+                    '--no-playlist',
+                    '-o', '-',
+                    decodedIdentifier
+                ]);
+
+                // Pipe yt-dlp's stdout directly to the HTTP response
+                ytDlpProcess.stdout.pipe(res);
+
+                // Log errors from yt-dlp
+                ytDlpProcess.stderr.on('data', (data) => {
+                    console.error(`[DOWNLOAD_VIDEO] yt-dlp stderr: ${data}`);
+                });
+
+                // Handle process exit/close
+                ytDlpProcess.on('close', (code) => {
+                    if (code !== 0) {
+                        console.error(`[DOWNLOAD_VIDEO] yt-dlp process exited with code ${code}`);
+                        // If headers haven't been sent, maybe send error. Otherwise, just end.
+                        if (!res.headersSent) {
+                            res.status(500).json({ error: `yt-dlp failed with code ${code}. Check server logs.` });
                         }
-                    });
-
-                    videoStream.on('error', (streamErr) => {
-                       console.error("[DOWNLOAD_VIDEO] Error during ytdl stream:", streamErr.message);
-                       // If headers haven't been sent, we can try to send an error status
-                       if (!res.headersSent) {
-                           res.status(500).json({ error: `Error streaming video: ${streamErr.message}` });
-                       } else {
-                           // If headers are sent, the stream is likely broken. End the response.
-                           res.end();
-                       }
-                    });
-                    
-                    videoStream.pipe(res);
-
-                } catch (ytdlError) {
-                    console.error("[DOWNLOAD_VIDEO] ytdl-core processing error:", ytdlError);
-                    if (!res.headersSent) {
-                        res.status(500).json({ error: `Failed to process YouTube URL: ${ytdlError.message}` });
+                    } else {
+                        console.log('[DOWNLOAD_VIDEO] yt-dlp stream finished successfully.');
                     }
-                }
+                    // Ensure response is ended if piping didn't close it automatically
+                    if (!res.writableEnded) { 
+                        res.end(); 
+                    }
+                });
+
+                // Handle errors spawning the process itself
+                ytDlpProcess.on('error', (spawnError) => {
+                    console.error("[DOWNLOAD_VIDEO] Failed to spawn yt-dlp process:", spawnError);
+                    if (!res.headersSent) {
+                        res.status(500).json({ error: `Server error: Failed to start download process. Is yt-dlp installed correctly in the environment?` });
+                    }
+                });
+
             } else {
                 // --- Handle Direct URL (Non-YouTube) ---
                 console.log("[DOWNLOAD_VIDEO] Identified as Direct URL. Redirecting user to:", decodedIdentifier);

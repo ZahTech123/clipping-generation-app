@@ -10,7 +10,7 @@
 export default function handler(req, res) {
     // Log to Vercel console that the function was hit
     console.log(`Vercel test function invoked with method: ${req.method}`);
-  
+  s
     // Send a successful JSON response
     res.status(200).json({
       message: "Vercel test function reporting for duty!",
